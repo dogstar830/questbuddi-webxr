@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>QuestBuddi — Gr8yzone Studios Inc.</title>
+<script>
+/* QuestBuddi built-in checker (house rule — ships from first creation):
+   global error trap registered FIRST in the page. The last error
+   (message, stack, time, current screen/mode) persists to localStorage;
+   boot stages log to a ring the Settings health panel displays. */
+(function () {
+  var EK = 'qp_lastError', SK = 'qp_bootStages';
+  window.__abStages = [];
+  function stage(s) { try { window.__abStages.push({ stage: s, ts: Date.now() }); if (window.__abStages.length > 60) window.__abStages.shift(); localStorage.setItem(SK, JSON.stringify(window.__abStages.slice(-40))); } catch (e) {} }
+  function record(err, where) { try { localStorage.setItem(EK, JSON.stringify({ message: String((err && err.message) || err || 'unknown error'), stack: String((err && err.stack) || ''), ts: Date.now(), where: where || '', screen: (window.__abCtx && window.__abCtx.screen) || '', mode: (window.__abCtx && window.__abCtx.mode) || '', url: location.href })); } catch (e) {} }
+  window.__abLogStage = stage; window.__abRecordError = record;
+  stage('page:html-loaded');
+  window.addEventListener('error', function (ev) { record(ev.error || ev.message, 'window.onerror'); });
+  window.addEventListener('unhandledrejection', function (ev) { record(ev.reason, 'unhandledrejection'); });
+})();
+</script>
+<script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+<style>
+  :root{
+    --teal:#004859; --teal-bright:#0e7d96; --ink:#eaf6f8; --ink-dim:#9fc3cc;
+    --glass:rgba(10,24,26,.88); --glass-line:rgba(201,151,63,.45);
+    --green:#1fae54; --green-d:#0f7a39; --red:#d92b2b; --red-d:#9c1a1a;
+    --amber:#E8A33D; --brass:#c9973f; --cream:#f5ecd7;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#02090d;
+    font-family:"Segoe UI",system-ui,Roboto,Helvetica,Arial,sans-serif;color:var(--ink)}
+  a-scene{position:fixed;inset:0}
+  /* ---------- top bar ---------- */
+  #topbar{position:fixed;top:0;left:0;right:0;z-index:30;display:flex;align-items:center;gap:10px;
+    padding:8px 12px;background:linear-gradient(180deg,rgba(2,12,16,.92),rgba(2,12,16,.55) 80%,transparent);
+    pointer-events:none}
+  #topbar>*{pointer-events:auto}
+  #brand{font-weight:800;font-size:22px;letter-spacing:.5px;color:var(--cream);text-shadow:0 0 14px rgba(232,163,61,.55)}
+  #brand small{display:block;font-size:10px;font-weight:600;letter-spacing:1.6px;color:var(--amber)}
+  #beaconWrap{display:flex;align-items:center;gap:7px;background:var(--glass);border:1px solid var(--glass-line);
+    border-radius:999px;padding:5px 12px 5px 8px;font-size:12px;font-weight:700;letter-spacing:.4px}
+  #beaconDot{width:14px;height:14px;border-radius:50%;background:var(--red);box-shadow:0 0 10px var(--red)}
+  #beaconDot.on{background:var(--green);box-shadow:0 0 12px var(--green)}
+  .spacer{flex:1}
+  .ctlBtn{border:none;cursor:pointer;font-weight:800;letter-spacing:.4px;border-radius:12px;color:#fff;
+    padding:11px 16px;font-size:14px;box-shadow:0 4px 14px rgba(0,0,0,.45);transition:transform .06s ease, filter .15s}
+  .ctlBtn:active{transform:scale(.96)}
+  #btnGive{background:linear-gradient(180deg,#27c463,var(--green-d))}
+  #btnStop{background:linear-gradient(180deg,#f04747,var(--red-d))}
+  .ghostBtn{background:var(--glass);border:1px solid var(--glass-line);color:var(--ink);border-radius:12px;
+    padding:10px 14px;font-size:13px;font-weight:700;cursor:pointer}
+  /* ---------- side panel ---------- */
+  #panel{position:fixed;top:64px;left:10px;bottom:88px;width:392px;max-width:calc(100vw - 20px);z-index:25;
+    background:var(--glass);border:1px solid var(--glass-line);border-radius:18px;display:flex;flex-direction:column;
+    backdrop-filter:blur(10px);box-shadow:0 10px 40px rgba(0,0,0,.55)}
+  #panel.hiddenPanel{opacity:0;visibility:hidden;transform:translateY(12px);pointer-events:none}
+  #tabs{display:flex;gap:6px;padding:10px 10px 0}
+  .tab{flex:1;border:1px solid var(--glass-line);background:rgba(255,255,255,.05);color:var(--ink-dim);
+    border-radius:10px 10px 0 0;padding:9px 2px;font-size:13px;font-weight:700;cursor:pointer}
+  .tab.active{background:rgba(232,163,61,.22);color:#fff;border-bottom-color:transparent}
+  .page{display:none;flex:1;overflow-y:auto;padding:12px}
+  .page.active{display:flex;flex-direction:column}
+  /* chat */
+  #personaHead{display:flex;gap:10px;align-items:center;background:rgba(255,255,255,.05);
+    border:1px solid var(--glass-line);border-radius:14px;padding:10px}
+  #pAvatar{width:46px;height:46px;border-radius:50%;flex:none;display:flex;align-items:center;justify-content:center;
+    font-size:20px;font-weight:900;color:#fff;border:2px solid rgba(255,255,255,.5)}
+  #pName{font-size:17px;font-weight:800}
+  #pMeta{font-size:12px;color:var(--ink-dim);line-height:1.35}
+  #pAbout{font-size:12.5px;color:var(--ink);margin-top:6px;line-height:1.45}
+  #memRow{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .memChip{background:rgba(14,125,150,.3);border:1px solid var(--glass-line);border-radius:999px;
+    padding:4px 6px 4px 10px;font-size:11.5px;display:flex;gap:6px;align-items:center}
+  .memChip button{background:none;border:none;color:#ffb3b3;cursor:pointer;font-size:13px;padding:0 2px}
+  #thread{flex:1;overflow-y:auto;padding:10px 2px;display:flex;flex-direction:column;gap:8px;min-height:120px}
+  .msg{max-width:88%;padding:9px 12px;border-radius:14px;font-size:14.5px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+  .msg.user{align-self:flex-end;background:linear-gradient(180deg,#0e7d96,#065a6e);border-bottom-right-radius:4px}
+  .msg.bot{align-self:flex-start;background:rgba(255,255,255,.09);border:1px solid rgba(255,255,255,.12);border-bottom-left-radius:4px}
+  .msg .who{display:block;font-size:10.5px;font-weight:800;letter-spacing:.6px;opacity:.75;margin-bottom:3px}
+  .msg .when{display:block;font-size:10px;opacity:.55;margin-top:4px}
+  .msg.hit{outline:2px solid var(--amber);box-shadow:0 0 14px rgba(255,179,0,.5)}
+  #typing{align-self:flex-start;font-size:12.5px;color:var(--ink-dim);display:none;padding:2px 6px}
+  #chips{display:flex;flex-wrap:wrap;gap:6px;padding:2px 0 8px}
+  .chip{background:rgba(255,255,255,.07);border:1px solid var(--glass-line);color:var(--ink);border-radius:999px;
+    padding:7px 12px;font-size:12.5px;cursor:pointer;font-weight:600}
+  .chip:hover{background:rgba(14,125,150,.4)}
+  #inputRow{display:flex;gap:7px}
+  #chatInput{flex:1;background:rgba(0,0,0,.4);border:1px solid var(--glass-line);border-radius:12px;color:#fff;
+    font-size:15px;padding:11px 12px;outline:none}
+  #chatInput:focus{border-color:var(--teal-bright)}
+  .sendBtn{background:linear-gradient(180deg,#0e7d96,#065a6e);border:none;color:#fff;border-radius:12px;
+    padding:0 16px;font-size:15px;font-weight:800;cursor:pointer}
+  #micBtn{background:rgba(255,255,255,.08);border:1px solid var(--glass-line);color:#fff;border-radius:12px;
+    width:46px;font-size:18px;cursor:pointer}
+  #micBtn.listening{background:var(--red);border-color:#ff8080}
+  .smallNote{font-size:11.5px;color:var(--ink-dim);line-height:1.5}
+  /* personas grid */
+  .pGrid{display:grid;grid-template-columns:1fr 1fr;gap:9px}
+  .pCard{border:1px solid var(--glass-line);border-radius:14px;padding:10px;cursor:pointer;background:rgba(255,255,255,.045)}
+  .pCard.active{border-color:var(--amber);background:rgba(255,179,0,.08)}
+  .pCard .dot{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;justify-content:center;
+    font-weight:900;color:#fff;margin-bottom:6px;border:2px solid rgba(255,255,255,.45)}
+  .pCard .nm{font-weight:800;font-size:14.5px}
+  .pCard .ct{font-size:11.5px;color:var(--ink-dim)}
+  .pCard .vb{font-size:12px;margin-top:4px;line-height:1.4}
+  .pCard .rowBtns{display:flex;gap:5px;margin-top:8px}
+  .miniBtn{flex:1;background:rgba(255,255,255,.08);border:1px solid var(--glass-line);color:var(--ink);
+    border-radius:8px;padding:6px 2px;font-size:11px;font-weight:700;cursor:pointer}
+  .miniBtn.danger{color:#ffb3b3}
+  /* search */
+  .fld{width:100%;background:rgba(0,0,0,.4);border:1px solid var(--glass-line);border-radius:10px;color:#fff;
+    font-size:14px;padding:10px;margin-bottom:8px;outline:none}
+  select.fld option{color:#000}
+  .dateRow{display:flex;gap:7px}.dateRow .fld{flex:1}
+  .result{border:1px solid var(--glass-line);border-radius:12px;padding:9px 11px;margin-bottom:8px;cursor:pointer;background:rgba(255,255,255,.045)}
+  .result:hover{background:rgba(14,125,150,.3)}
+  .result .rHead{font-size:11.5px;font-weight:800;letter-spacing:.4px;color:var(--ink-dim)}
+  .result .rText{font-size:13.5px;margin-top:3px;line-height:1.45}
+  .result mark{background:var(--amber);color:#201600;border-radius:3px;padding:0 2px}
+  /* settings / about */
+  .setBlock{background:rgba(255,255,255,.05);border:1px solid var(--glass-line);border-radius:14px;padding:12px;margin-bottom:10px}
+  .setBlock h3{margin:0 0 8px;font-size:14.5px}
+  .switchRow{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:8px 0}
+  .honest{font-size:12.5px;line-height:1.55;color:var(--ink)}
+  .honest b{color:#ffd97a}
+  #vrNote{position:fixed;right:12px;bottom:90px;z-index:20;background:var(--glass);border:1px solid var(--glass-line);
+    border-radius:12px;padding:9px 13px;font-size:12.5px;color:var(--ink);max-width:300px;line-height:1.5}
+  #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);z-index:60;background:rgba(0,30,40,.95);
+    border:1px solid var(--glass-line);color:#fff;padding:11px 18px;border-radius:999px;font-size:14px;font-weight:600;
+    display:none;box-shadow:0 8px 30px rgba(0,0,0,.6);max-width:92vw;text-align:center}
+  /* room setup wizard */
+  #roomWizard,#permCard{position:fixed;inset:0;z-index:70;background:rgba(1,8,11,.72);display:none;align-items:center;justify-content:center}
+  #roomWizard.open,#permCard.open{display:flex}
+  .wzCard{position:relative;background:var(--glass);border:1px solid var(--glass-line);border-radius:18px;
+    padding:20px;width:520px;max-width:94vw;max-height:88vh;overflow-y:auto;box-shadow:0 18px 60px rgba(0,0,0,.7)}
+  #wzTitle{font-size:19px;font-weight:800;margin-bottom:8px}
+  #wzBody{font-size:14px;line-height:1.6;color:var(--ink)}
+  #wzBody .big{font-size:22px;font-weight:800;color:#ffd97a}
+  #wzButtons{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+  #wzButtons .sendBtn{padding:11px 16px;border-radius:10px}
+  #wzButtons .miniBtn{padding:11px 14px;font-size:13px}
+  #wzClose{position:absolute;top:10px;right:12px;background:none;border:none;color:var(--ink-dim);font-size:18px;cursor:pointer}
+  /* ---------- bottom HUD dock ---------- */
+  #dock{position:fixed;left:50%;transform:translateX(-50%);bottom:10px;z-index:35;display:flex;gap:7px;
+    background:var(--glass);border:1px solid var(--glass-line);border-radius:18px;padding:8px;
+    box-shadow:0 10px 34px rgba(0,0,0,.6);backdrop-filter:blur(10px)}
+  .dockBtn{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:66px;padding:8px 6px 7px;
+    background:rgba(255,255,255,.05);border:1px solid transparent;border-radius:13px;color:var(--ink);cursor:pointer}
+  .dockBtn .ic{font-size:20px;line-height:1;display:flex}
+  .dockBtn .ic svg{width:23px;height:23px}
+  .dockBtn .lb{font-size:11px;font-weight:800;letter-spacing:.4px}
+  .dockBtn.active{background:rgba(232,163,61,.25);border-color:var(--glass-line);color:#fff}
+  .dockBtn:active{transform:scale(.95)}
+  /* My Screen dropdown */
+  #myScreenWrap{display:flex;align-items:center;gap:7px;background:var(--glass);border:1px solid var(--glass-line);
+    border-radius:12px;padding:6px 10px;font-size:13px;font-weight:800}
+  .screenSel{background:rgba(0,0,0,.35);color:#fff;border:1px solid var(--glass-line);border-radius:8px;
+    font-size:13.5px;font-weight:700;padding:6px 8px;outline:none;cursor:pointer}
+  .screenSel option{color:#000}
+  /* hidden-HUD state: everything animates out; only the rescue bar survives */
+  #topbar,#dock,#vrNote{transition:opacity .25s ease,transform .25s ease,visibility 0s}
+  #showHudBar{position:fixed;left:50%;bottom:12px;z-index:40;gap:8px;align-items:center;display:flex;opacity:0;visibility:hidden;transform:translate(-50%,12px);
+    transition:opacity .25s ease,transform .25s ease,visibility 0s .25s}
+  body.hud-hidden #topbar,body.hud-hidden #dock,body.hud-hidden #vrNote{opacity:0;visibility:hidden;transform:translateY(-10px);
+    pointer-events:none;transition:opacity .25s ease,transform .25s ease,visibility 0s .25s}
+  body.hud-hidden #dock{transform:translate(-50%,14px)}
+  body.hud-hidden #showHudBar{opacity:1;visibility:visible;transform:translate(-50%,0);transition:opacity .25s ease,transform .25s ease,visibility 0s}
+  #panel{transition:opacity .25s ease,transform .25s ease,visibility 0s}
+  #panel.hiddenPanel{opacity:0;visibility:hidden;transform:translateY(12px);pointer-events:none;transition:opacity .25s ease,transform .25s ease,visibility 0s .25s}
+  #dock{max-width:97vw;overflow-x:auto;scrollbar-width:none}
+  #dock::-webkit-scrollbar{display:none}
+  .dockBtn.recording{background:rgba(217,43,43,.28);border-color:#ff8080;color:#fff}
+  .dockBtn.recording .ic svg{animation:recPulse 1.1s ease-in-out infinite}
+  @keyframes recPulse{0%,100%{opacity:1}50%{opacity:.35}}
+  #btnRecStop{background:linear-gradient(180deg,#f04747,var(--red-d));border:none;color:#fff;border-radius:999px;
+    padding:11px 16px;font-size:14px;font-weight:800;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.6);display:none}
+  #btnShowHud{background:linear-gradient(180deg,#0e7d96,#065a6e);border:1px solid var(--glass-line);color:#fff;
+    border-radius:999px;padding:11px 20px;font-size:14px;font-weight:800;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.6)}
+  #btnShowStop{background:linear-gradient(180deg,#f04747,var(--red-d));border:none;color:#fff;border-radius:999px;
+    padding:11px 16px;font-size:14px;font-weight:800;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.6)}
+  .shareOpt{display:flex;flex-direction:column;gap:3px;width:100%;text-align:left;background:rgba(255,255,255,.06);
+    border:1px solid var(--glass-line);border-radius:12px;padding:11px 13px;color:var(--ink);cursor:pointer;margin-bottom:8px;font-size:14px}
+  .shareOpt span{font-size:12.5px;color:var(--ink-dim);line-height:1.45}
+  .shareOpt:hover{background:rgba(14,125,150,.35)}
+  .goBtn{background:linear-gradient(180deg,#27c463,var(--green-d));border:none;color:#fff;border-radius:10px;
+    padding:10px 16px;font-size:13.5px;font-weight:800;cursor:pointer}
+  .stopBtn{background:linear-gradient(180deg,#f04747,var(--red-d));border:none;color:#fff;border-radius:12px;
+    padding:12px 16px;font-size:14.5px;font-weight:800;cursor:pointer}
+  .hl-cue{outline:3px solid #00F0FF !important;outline-offset:2px;box-shadow:0 0 18px rgba(0,240,255,.8) !important;
+    animation:hlPulse 1.1s ease-in-out infinite}
+  @keyframes hlPulse{0%,100%{box-shadow:0 0 10px rgba(0,240,255,.55)}50%{box-shadow:0 0 22px rgba(0,240,255,.95)}}
+  #healthError{display:none;background:rgba(0,0,0,.45);border:1px solid rgba(255,128,128,.5);border-radius:10px;
+    padding:10px;font-size:11.5px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow-y:auto;color:#ffd9d9}
+  .flash{animation:flashRing 1.2s ease}
+  @keyframes flashRing{0%{box-shadow:0 0 0 0 rgba(255,179,0,.0)}25%{box-shadow:0 0 0 3px rgba(255,179,0,.85)}100%{box-shadow:0 0 0 0 rgba(255,179,0,0)}}
+  /* share banner + browser/media tile */
+  #shareBanner{position:fixed;top:64px;left:50%;transform:translateX(-50%);z-index:45;display:none;align-items:center;gap:10px;
+    background:rgba(30,6,6,.92);border:1px solid #ff8080;border-radius:999px;padding:8px 10px 8px 16px;
+    font-size:13.5px;font-weight:700;color:#ffe9e9;box-shadow:0 10px 30px rgba(0,0,0,.6);max-width:96vw}
+  #shareBanner.on{display:flex}
+  #shareBanner .dot{width:11px;height:11px;border-radius:50%;background:#ff3b30;animation:recPulse 1.1s infinite;flex:none}
+  #shareBanner button{border:none;border-radius:999px;padding:8px 14px;font-weight:800;cursor:pointer;font-size:12.5px}
+  #shareAsk{background:rgba(255,255,255,.14);color:#fff}
+  #shareStop{background:linear-gradient(180deg,#f04747,var(--red-d));color:#fff}
+  #browserTile{position:fixed;right:10px;top:118px;width:min(580px,95vw);height:54vh;z-index:44;display:none;flex-direction:column;
+    background:var(--glass);border:1px solid var(--glass-line);border-radius:16px;overflow:hidden;box-shadow:0 14px 44px rgba(0,0,0,.6)}
+  #browserTile.open{display:flex}
+  #btHead{display:flex;align-items:center;gap:8px;padding:8px 12px;background:rgba(255,255,255,.05);font-size:12.5px}
+  #btUrl{flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--ink-dim)}
+  #btBody{flex:1;background:#0a1418;display:flex;align-items:center;justify-content:center}
+  #btBody iframe{width:100%;height:100%;border:none;background:#fff}
+  #btBody img{max-width:100%;max-height:100%;object-fit:contain}
+  @media (max-width:760px){
+    #panel{top:auto;height:52vh;left:6px;right:6px;width:auto;bottom:78px}
+    .dockBtn{min-width:52px;padding:7px 4px 6px}
+    .dockBtn .ic{font-size:17px}
+    #topbar{flex-wrap:wrap}
+    #brand{font-size:18px}
+    .ctlBtn{padding:9px 11px;font-size:12.5px}
+    #vrNote{display:none}
+  }
+</style>
+</head>
+<body>
+
+<!-- ======================= 3D SCENE ======================= -->
+<a-scene id="scene" background="color:#02090d" fog="type:linear; color:#03141b; near:14; far:42"
+         vr-mode-ui="enabled:true" renderer="antialias:true; colorManagement:true; alpha:true"
+         webxr="optionalFeatures: hit-test, local-floor">
+  <a-entity id="rig">
+    <a-camera id="cam" position="0 1.65 3.4" look-controls="enabled:true" wasd-controls="enabled:false"
+              cursor="rayOrigin: mouse" raycaster="objects:.clickable; far:30">
+      <!-- in-world HUD dock (head-relative, mirrors the 2D dock) -->
+      <a-entity id="hudDock" position="0 -0.66 -1.3"></a-entity>
+      <a-entity id="showPill3d" class="clickable" position="0.42 -0.7 -1.25" visible="false">
+        <a-box depth="0.03" height="0.1" width="0.36" material="color:#0e7d96; emissive:#065a6e; emissiveIntensity:.9; roughness:.35"></a-box>
+        <a-plane id="showPillFace" position="0 0 0.017" width="0.35" height="0.09"></a-plane>
+      </a-entity>
+      <a-entity id="stopPill3d" class="clickable" position="0.83 -0.7 -1.25" visible="false">
+        <a-box depth="0.03" height="0.1" width="0.3" material="color:#d92b2b; emissive:#9c1a1a; emissiveIntensity:.9; roughness:.35"></a-box>
+        <a-plane id="stopPillFace" position="0 0 0.017" width="0.29" height="0.09"></a-plane>
+      </a-entity>
+    </a-camera>
+    <a-entity id="leftHand" laser-controls="hand:left" raycaster="objects:.clickable; far:30; lineColor:#37e0c8; lineOpacity:0.7"></a-entity>
+    <a-entity id="rightHand" laser-controls="hand:right" raycaster="objects:.clickable; far:30; lineColor:#37e0c8; lineOpacity:0.7"></a-entity>
+  </a-entity>
+
+  <!-- lights -->
+  <a-light type="ambient" color="#7fb6c4" intensity="0.75"></a-light>
+  <a-light type="directional" color="#ffffff" intensity="1.1" position="4 8 5"></a-light>
+  <a-light type="point" color="#0e7d96" intensity="14" distance="18" position="0 3.4 -1"></a-light>
+
+  <!-- starfield + earth are built by app.js (procedural, no external images) -->
+  <a-entity id="starfield"></a-entity>
+  <a-entity id="earth" position="-13 -7.5 -24"></a-entity>
+
+  <!-- command deck platform -->
+  <a-cylinder id="deck" position="0 -0.06 0" radius="5.4" height="0.12" color="#06222c"
+              material="roughness:0.45; metalness:0.55"></a-cylinder>
+  <a-circle id="floorDeck" position="0 0.011 0.6" rotation="-90 0 0" radius="5.1"></a-circle>
+  <a-ring id="deckRing" position="0 0.005 0" rotation="-90 0 0" radius-inner="5.15" radius-outer="5.38"
+          material="color:#14b8d4; emissive:#0e7d96; emissiveIntensity:1.6; side:double"></a-ring>
+  <a-ring position="0 0.004 0" rotation="-90 0 0" radius-inner="3.3" radius-outer="3.38"
+          material="color:#0e7d96; emissive:#004859; emissiveIntensity:1.1; side:double"></a-ring>
+
+  <!-- ===== #world: everything that moves as one group in Room Mode (AR) placement ===== -->
+  <a-entity id="world">
+  <!-- in-world panels (canvas textures painted by app.js) -->
+  <a-plane id="panelIdentity" class="clickable" position="0 2.52 -2.35" width="2.9" height="1.5"></a-plane>
+  <a-plane id="panelChat" position="3.05 2.05 -1.55" rotation="0 -33 0" width="2.35" height="1.9"></a-plane>
+  <a-plane id="panelControl" position="-3.05 2.05 -1.55" rotation="0 33 0" width="2.35" height="1.9"></a-plane>
+
+  <!-- status beacon -->
+  <a-entity id="beacon" position="-3.05 3.28 -1.55">
+    <a-sphere id="beaconBall" radius="0.11" material="color:#d92b2b; emissive:#d92b2b; emissiveIntensity:2.2"></a-sphere>
+    <a-ring radius-inner="0.16" radius-outer="0.19" material="color:#9fc3cc; side:double; emissive:#446; emissiveIntensity:.4"></a-ring>
+  </a-entity>
+
+  <!-- control console: GIVE BUDDIES CONTROL / STOP BUDDIES as 3D buttons -->
+  <a-entity id="console" position="0 0 -1.15">
+    <a-box position="0 0.48 0" depth="0.55" height="0.1" width="2.5" rotation="-18 0 0"
+           material="color:#0a2e3a; roughness:.35; metalness:.6"></a-box>
+    <a-entity id="btnGive3d" class="clickable" position="-0.66 0.62 0.05" rotation="-18 0 0">
+      <a-box depth="0.34" height="0.09" width="1.12" material="color:#1fae54; emissive:#0f7a39; emissiveIntensity:.9; roughness:.3"></a-box>
+      <a-plane class="btnFace" position="0 0.048 0" rotation="-90 0 0" width="1.08" height="0.3"></a-plane>
+    </a-entity>
+    <a-entity id="btnStop3d" class="clickable" position="0.66 0.62 0.05" rotation="-18 0 0">
+      <a-box depth="0.34" height="0.09" width="1.12" material="color:#d92b2b; emissive:#9c1a1a; emissiveIntensity:.9; roughness:.3"></a-box>
+      <a-plane class="btnFace" position="0 0.048 0" rotation="-90 0 0" width="1.08" height="0.3"></a-plane>
+    </a-entity>
+  </a-entity>
+
+  <!-- the big stage display — only lit while Share Screen is live -->
+  <a-entity id="bigScreenEnt" visible="false">
+    <a-box position="0 2.95 -4.55" depth="0.09" height="2.62" width="5.02" material="color:#6b4f22; metalness:.75; roughness:.35"></a-box>
+    <a-plane id="bigScreen" position="0 2.95 -4.49" width="4.8" height="2.4"></a-plane>
+  </a-entity>
+
+  <!-- ROOM SETUP WIZARD (in-world panel + buttons; driven by app.js) -->
+  <a-entity id="wizard3d" visible="false">
+    <a-plane id="panelWizard" position="0 1.52 -0.8" width="2.0" height="1.2"></a-plane>
+    <a-entity class="clickable wzBtn" id="wzB0" position="-0.79 0.74 -0.8"><a-box depth="0.05" height="0.17" width="0.5" material="color:#0a2e3a; emissive:#004859; emissiveIntensity:.7; roughness:.35"></a-box><a-plane class="wzFace" position="0 0 0.028" width="0.48" height="0.15"></a-plane></a-entity>
+    <a-entity class="clickable wzBtn" id="wzB1" position="-0.265 0.74 -0.8"><a-box depth="0.05" height="0.17" width="0.5" material="color:#0a2e3a; emissive:#004859; emissiveIntensity:.7; roughness:.35"></a-box><a-plane class="wzFace" position="0 0 0.028" width="0.48" height="0.15"></a-plane></a-entity>
+    <a-entity class="clickable wzBtn" id="wzB2" position="0.265 0.74 -0.8"><a-box depth="0.05" height="0.17" width="0.5" material="color:#0a2e3a; emissive:#004859; emissiveIntensity:.7; roughness:.35"></a-box><a-plane class="wzFace" position="0 0 0.028" width="0.48" height="0.15"></a-plane></a-entity>
+    <a-entity class="clickable wzBtn" id="wzB3" position="0.79 0.74 -0.8"><a-box depth="0.05" height="0.17" width="0.5" material="color:#0a2e3a; emissive:#004859; emissiveIntensity:.7; roughness:.35"></a-box><a-plane class="wzFace" position="0 0 0.028" width="0.48" height="0.15"></a-plane></a-entity>
+  </a-entity>
+
+  <!-- quick-reply chips in world (tappable canned messages) -->
+  <a-entity id="chipRow" position="2.95 0.98 -1.5" rotation="0 -33 0"></a-entity>
+
+  <!-- persona bots are built by app.js onto this arc -->
+  <a-entity id="botArc"></a-entity>
+  </a-entity><!-- /#world -->
+
+  <!-- AR placement reticle (shown only while placing buddies in Room Mode) -->
+  <a-ring id="reticle" position="0 -5 0" rotation="-90 0 0" radius-inner="0.16" radius-outer="0.22" visible="false"
+          material="color:#37e0c8; emissive:#0e7d96; emissiveIntensity:1.6; side:double; transparent:true; opacity:0.95"></a-ring>
+
+  <!-- splash title in world -->
+  <a-plane id="titleCard" position="0 3.62 -3.9" width="4.4" height="0.95"></a-plane>
+</a-scene>
+
+<!-- ======================= HTML OVERLAY UI ======================= -->
+<div id="topbar">
+  <div id="brand">AI BUDDIES<small>GR8YZONE STUDIOS INC.</small></div>
+  <div id="beaconWrap"><span id="beaconDot"></span><span id="beaconText">BUDDIES CONTROL: OFF</span><span id="voiceHudIcon" title="Voice Chat state">🔇</span></div>
+  <label id="myScreenWrap">My Screen
+    <select class="screenSel" id="myScreen">
+      <option value="chat">Chat</option>
+      <option value="crew">Crew</option>
+      <option value="search">Search</option>
+      <option value="notes">Notes &amp; Reminders</option>
+      <option value="room">Room Setup</option>
+      <option value="settings">Settings</option>
+      <option value="about">About</option>
+    </select>
+  </label>
+  <div class="spacer"></div>
+  <button class="ctlBtn" id="btnGive">GIVE BUDDIES CONTROL</button>
+  <button class="ctlBtn" id="btnStop">STOP BUDDIES</button>
+  <button class="ghostBtn" id="btnAR" style="border-color:#1fae54;color:#c9f7da">Room Mode (AR)</button>
+  <button class="ghostBtn" id="btnVR">Deck VR</button>
+  <button class="ghostBtn" id="btnPanel">☰ Panel</button>
+</div>
+
+<div id="panel">
+  <div id="tabs">
+    <button class="tab active" data-page="chat">Chat</button>
+    <button class="tab" data-page="personas">Crew</button>
+    <button class="tab" data-page="search">Search</button>
+    <button class="tab" data-page="notes">Notes</button>
+    <button class="tab" data-page="settings">Settings</button>
+  </div>
+
+  <!-- CHAT PAGE -->
+  <div class="page active" id="page-chat">
+    <div id="dailyCards"></div>
+    <div id="personaHead">
+      <div id="pAvatar">?</div>
+      <div style="flex:1;min-width:0">
+        <div id="pName">Pick a Buddy</div>
+        <div id="pMeta">Ten buddies are standing by on the deck.</div>
+        <div id="pAbout"></div>
+        <div id="memRow"></div>
+      </div>
+      <button class="miniBtn" id="newConvBtn" style="flex:none;align-self:flex-start" title="Start a fresh conversation thread with this buddy">＋ New chat</button>
+    </div>
+    <div id="quickActions" style="display:flex;gap:7px;margin-top:8px">
+      <button class="miniBtn" id="qaDraw" style="flex:1;padding:9px 4px">🎨 Draw</button>
+      <button class="miniBtn" id="qaJump" style="flex:1;padding:9px 4px">🧭 Jump Map</button>
+      <button class="miniBtn" id="qaHelp" style="flex:1;padding:9px 4px">🧰 Help me…</button>
+      <button class="miniBtn" id="qaPhone" style="flex:1;padding:9px 4px">📱 Phone</button>
+    </div>
+    <div id="voiceBar" style="display:flex;align-items:center;gap:8px;margin-top:8px;background:rgba(255,255,255,.05);border:1px solid var(--glass-line);border-radius:12px;padding:7px 10px">
+      <span style="font-size:13px;font-weight:800">🎙️ Voice Chat</span>
+      <span class="smallNote" id="voiceStateLbl">Off — text only</span>
+      <span style="flex:1"></span>
+      <button class="miniBtn" id="voiceToggle" style="flex:none;padding:7px 16px">OFF</button>
+    </div>
+    <div id="thread"></div>
+    <div id="typing">✍️ your buddy is typing…</div>
+    <div id="chips"></div>
+    <div id="inputRow">
+      <input id="chatInput" type="text" placeholder="Type a message… (try: my name is …)" autocomplete="off" enterkeyhint="send" inputmode="text">
+      <button id="micBtn" title="Voice input">🎤</button>
+      <button class="sendBtn" id="sendBtn">Send</button>
+    </div>
+    <div class="smallNote" style="margin-top:7px">Tip: say or type <b>“stop”</b> any time and ALL buddy functions halt at once. Everything you say is stored only on this device.</div>
+  </div>
+
+  <!-- PERSONAS PAGE -->
+  <div class="page" id="page-personas">
+    <div class="smallNote" style="margin-bottom:9px">Ten buddies from around the world. Tap one to make them your active Buddy — in this panel and in the 3D deck. Each buddy keeps their <b>own</b> memory and conversation history.</div>
+    <div id="avatarCard" style="margin-bottom:10px"></div>
+    <div class="pGrid" id="pGrid"></div>
+  </div>
+
+  <!-- SEARCH PAGE -->
+  <div class="page" id="page-search">
+    <input class="fld" id="searchInput" type="text" placeholder="Search every conversation…">
+    <select class="fld" id="searchPersona"><option value="">All buddies</option></select>
+    <div class="dateRow">
+      <input class="fld" id="searchFrom" type="date" title="From date">
+      <input class="fld" id="searchTo" type="date" title="To date">
+    </div>
+    <button class="sendBtn" id="searchBtn" style="padding:11px;border-radius:10px;margin-bottom:10px">🔎 Search conversations</button>
+    <div id="searchResults"></div>
+  </div>
+
+  <!-- NOTES PAGE -->
+  <div class="page" id="page-notes">
+    <div class="smallNote" style="margin-bottom:9px">Notes &amp; reminders live <b>only on this device</b>. Set a time and your buddy will speak up here while QuestBuddi is open.</div>
+    <input class="fld" id="noteInput" type="text" placeholder="Write a note or reminder…">
+    <div class="dateRow">
+      <input class="fld" id="noteWhen" type="datetime-local" title="Remind me at (optional)">
+      <button class="sendBtn" id="noteAdd" style="border-radius:10px;padding:0 18px">＋ Add</button>
+    </div>
+    <div id="notesList"></div>
+  </div>
+
+  <!-- SETTINGS PAGE -->
+  <div class="page" id="page-settings">
+    <div class="setBlock" id="permBlock">
+      <h3>Permissions</h3>
+      <div class="switchRow"><span>🎙️ <b>Microphone</b> — for tap-to-talk voice commands</span>
+        <span style="display:flex;gap:7px;align-items:center"><span class="smallNote" id="permMicStatus">not asked yet</span><button class="miniBtn" id="permMicBtn" style="flex:none">Re-request</button></span>
+      </div>
+      <div class="smallNote" style="margin-top:6px">🎥 <b>Video / capture:</b> no permission exists to grant — QuestBuddi can only capture its own 3D view (Screenshot / Record on the dock). It can <b>never</b> access your Quest's room cameras; Quest keeps passthrough private. That's a privacy plus, and it's permanent.</div>
+      <div class="switchRow"><span>🎙️ <b>Voice Chat</b> — mic + spoken replies</span>
+        <button class="miniBtn" id="voiceToggle2" style="flex:none;padding:8px 18px">OFF</button>
+      </div>
+      <div class="smallNote">Mirrored with the switch in the chat header. STOP BUDDIES forces voice off while stopped.</div>
+    </div>
+    <div class="setBlock">
+      <h3>🧠 Live AI (optional)</h3>
+      <div class="smallNote">QuestBuddi works fully offline with its built-in brain. If you want live AI answers, paste <b>your own</b> Grok (xAI) or Perplexity API key below. The key is stored <b>only in this browser on this device</b>, is sent only to the provider you pick, and Live AI stays OFF until you switch it on. Any error → the offline brain answers instead.</div>
+      <div class="switchRow"><span>Provider</span>
+        <select class="fld" id="liveProvider" style="width:170px;margin:0">
+          <option value="grok">Grok (xAI)</option>
+          <option value="perplexity">Perplexity</option>
+        </select>
+      </div>
+      <input class="fld" id="liveKey" type="password" placeholder="Paste your API key (kept on this device only)" autocomplete="off">
+      <div class="switchRow"><span><b>Live AI</b></span>
+        <button class="miniBtn" id="liveToggle" style="flex:none;padding:8px 18px">OFF</button>
+      </div>
+      <div class="smallNote" id="liveStatus"></div>
+    </div>
+    <div class="setBlock">
+      <h3>🎷 Lounge ambience (original, generated live)</h3>
+      <div class="switchRow"><span><b>Ambience</b> — a soft procedural lounge loop made by the app itself. No recordings, no copyrighted music.</span>
+        <button class="miniBtn" id="ambToggle" style="flex:none;padding:8px 18px">OFF</button>
+      </div>
+      <div class="smallNote">Off by default. STOP BUDDIES pauses it too.</div>
+    </div>
+    <div class="setBlock" id="aboutBlock">
+      <h3>🎙️ Buddies Control — honest scope</h3>
+      <div class="honest">While Control is <b>ON</b>, your Buddy can: listen when you tap the mic, answer and chat, remember facts you share, and run things <b>inside this QuestBuddi world</b> (switch buddies, open panels, follow web links you tap).<br><br>
+      QuestBuddi <b>cannot</b> control your whole headset or other apps — Meta doesn't allow any app to do that. True headset-wide takeover is the <b>phase-2 bridge</b>, coming later. Anyone who claims otherwise in v1 is faking it — we don't.<br><br>
+      🛑 <b>STOP BUDDIES</b> works instantly, always: mic off, replies canceled, Control OFF.<br><br>
+      <b>Capturing:</b> the dock's Screenshot / Record buttons capture only QuestBuddi' own 3D view. In Room Mode your real room is never in the capture — Quest keeps it private. To record <i>everything</i> including your room, use the Quest's built-in recording (press the Meta button → Record Video).<br><br>
+      <b>Typing</b> uses your device's own keyboard — Gboard on your phone; Meta's keyboard in the headset (apps can't swap that one).<br><br>
+      <b>Roadmap:</b> portals, shared rooms and the Avatar Studio are future phases — designed honestly in ROADMAP.md, never faked here.</div>
+    </div>
+    <div class="setBlock" id="roomBlock">
+      <h3>🏠 Room Mode (AR) — the headline way to use QuestBuddi</h3>
+      <div class="switchRow"><span>Preferred mode</span>
+        <select class="fld" id="modePref" style="width:190px;margin:0">
+          <option value="ar">Room Mode (AR) first</option>
+          <option value="vr">Deck Mode (VR) first</option>
+        </select>
+      </div>
+      <div class="smallNote" id="roomStatus" style="margin:8px 0">Room: not set up yet.</div>
+      <div class="rowBtns" style="display:flex;flex-wrap:wrap;gap:7px;margin:6px 0">
+        <button class="miniBtn" id="btnRescan" style="flex:1">🧭 Rescan room</button>
+        <button class="miniBtn" id="btnHeight" style="flex:1">📏 Height check</button>
+      </div>
+      <div class="rowBtns" style="display:flex;flex-wrap:wrap;gap:7px;margin:0 0 6px">
+        <button class="miniBtn" id="btnRecenter" style="flex:1">🎯 Re-center</button>
+        <button class="miniBtn danger" id="btnResetRoom" style="flex:1">Reset room</button>
+      </div>
+      <div class="switchRow"><span><b>Use my saved room</b></span>
+        <button class="miniBtn" id="roomToggle" style="flex:none;padding:8px 18px">ON</button>
+      </div>
+      <div class="honest">In Room Mode your buddies stand on light pads in the open space in front of you, in your <b>real room</b> (passthrough). Honest limits: QuestBuddi <b>can't see your furniture</b> — buddies don't dodge your couch, don't hide behind it, and don't cast real shadows. Their walking paths stay in that front area. If AR isn't available on the device, QuestBuddi opens the 3D Deck instead and tells you plainly.</div>
+    </div>
+    <div class="setBlock">
+      <h3>💡 Highlight cues</h3>
+      <div class="switchRow"><span><b>Highlight cues</b> — when a buddy describes something, it gets a neon cyan outline that <b>stays</b> until you tap Continue ▶, tap the thing itself, type, or answer the buddy's question.</span>
+        <button class="miniBtn" id="hlToggle" style="flex:none;padding:8px 18px">ON</button>
+      </div>
+      <div class="smallNote">Off = buddies describe with words only.</div>
+    </div>
+    <div class="setBlock" id="healthBlock">
+      <h3>🩺 App health / last error</h3>
+      <div class="smallNote" id="healthStatus">No errors recorded. If anything ever breaks, the last error is saved here automatically — even mid-boot.</div>
+      <pre id="healthError"></pre>
+      <div class="smallNote" style="font-weight:800;margin:10px 0 4px">BOOT STAGES REACHED (this session)</div>
+      <div class="smallNote" id="healthStages" style="white-space:pre-wrap;line-height:1.6">No stages logged yet this session.</div>
+      <div class="rowBtns" style="display:flex;gap:7px;margin-top:9px">
+        <button class="miniBtn" id="healthCopy" style="flex:1">Copy error</button>
+        <button class="miniBtn" id="healthRefresh" style="flex:1">Refresh</button>
+        <button class="miniBtn danger" id="healthClear" style="flex:1">Clear</button>
+      </div>
+      <div class="smallNote" style="margin-top:7px">QuestBuddi watches itself from the very first line of the page: if a boot stage ever fails, the error lands here with its stack trace, and the flat 2D app still opens — never a blank page.</div>
+    </div>
+    <div class="setBlock" id="avatarBlock">
+      <h3>🧍 Your Avatar — QuestBuddi Studio</h3>
+      <div class="smallNote" id="avatarStatus">No avatar imported yet. Scan yourself with the <b>QuestBuddi Studio</b> phone app, then import the package here — You will stand on the stage with your Buddies as a hologram turntable.</div>
+      <div class="rowBtns" style="display:flex;gap:7px;margin-top:9px">
+        <button class="miniBtn" id="btnImportAvatar" style="flex:1">Import avatar (files)</button>
+        <button class="miniBtn" id="btnImportAvatarDrive" style="flex:1">Import from Google Drive</button>
+      </div>
+      <div class="smallNote" id="avatarDriveNote" style="margin-top:7px"></div>
+    </div>
+    <div class="setBlock">
+      <h3>🗄️ Your data</h3>
+      <div class="smallNote">All conversations and buddy memories live in this browser's on-device database (IndexedDB) on your Quest / computer. Nothing is uploaded. Clearing a buddy's history is permanent and local.</div>
+      <div class="rowBtns" style="display:flex;gap:7px;margin-top:9px">
+        <button class="miniBtn danger" id="wipeAll">Erase ALL buddies' history &amp; memory</button>
+      </div>
+    </div>
+    <div class="smallNote" style="text-align:center;padding:4px">QuestBuddi v1.0 WebXR • Developed by <b>Gr8yzone Studios Inc.</b>, Panama City, FL</div>
+  </div>
+</div>
+
+<div id="vrNote">🏠 <b>On your Quest 3:</b> open this page in the Quest Browser and tap <b>Room Mode (AR)</b> — your buddies appear standing in your real room. Aim at the floor and tap to place them. <b>Deck VR</b> is the full space-deck alternative. On a computer, everything also works right here in 2D.</div>
+<!-- sharing banner (persistent while a share is live) -->
+<div id="shareBanner"><span class="dot"></span><span id="shareBannerText">You're sharing</span>
+  <button id="shareAsk">Ask buddy about it</button><button id="shareStop">Stop Sharing</button>
+</div>
+
+<!-- browser / media tile (flat-panel companion to the in-world big display) -->
+<div id="browserTile">
+  <div id="btHead"><b>Shared view</b><span id="btUrl"></span><button class="miniBtn" id="btClose" style="flex:none">Close</button></div>
+  <div id="btBody"></div>
+</div>
+
+<!-- ======================= BOTTOM HUD DOCK ======================= -->
+<div id="dock">
+  <button class="dockBtn" data-nav="home"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 11.2 12 4l8.5 7.2"/><path d="M5.5 9.8V20h13V9.8"/><path d="M9.8 20v-5.2h4.4V20"/></svg></span><span class="lb">Home</span></button>
+  <button class="dockBtn" data-nav="chat"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5v9a1.5 1.5 0 0 1-1.5 1.5H10l-4.6 3.8v-3.8H5.5A1.5 1.5 0 0 1 4 14.5z"/></svg></span><span class="lb">Chat</span></button>
+  <button class="dockBtn" data-nav="crew"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 7.5V4"/><circle cx="12" cy="3" r="1.1" fill="currentColor" stroke="none"/><rect x="4.5" y="7.5" width="15" height="11" rx="2.5"/><circle cx="9.2" cy="12.6" r="1.15" fill="currentColor" stroke="none"/><circle cx="14.8" cy="12.6" r="1.15" fill="currentColor" stroke="none"/><path d="M9.4 16h5.2"/></svg></span><span class="lb">Crew</span></button>
+  <button class="dockBtn" data-nav="search"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="6.8"/><path d="M16.2 16.2 20.8 20.8"/></svg></span><span class="lb">Search</span></button>
+  <button class="dockBtn" data-nav="notes"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5h7l4 4V20a.5.5 0 0 1-.5.5h-10A.5.5 0 0 1 7 20z"/><path d="M14 3.5v4h4"/><path d="M9.5 12.5h5M9.5 16h5"/></svg></span><span class="lb">Notes</span></button>
+  <button class="dockBtn" data-nav="shot"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9.2 7 10.4 4.8h3.2L14.8 7"/><rect x="3" y="7" width="18" height="12.5" rx="2"/><circle cx="12" cy="13.2" r="3.4"/></svg></span><span class="lb">Screenshot</span></button>
+  <button class="dockBtn" data-nav="record" id="dockRecord"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="8.6"/><circle cx="12" cy="12" r="3.6" fill="currentColor" stroke="none"/></svg></span><span class="lb" id="dockRecordLb">Record</span></button>
+  <button class="dockBtn" data-nav="share" id="dockShare"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="6" cy="12" r="2.6"/><circle cx="17.5" cy="5.5" r="2.6"/><circle cx="17.5" cy="18.5" r="2.6"/><path d="M8.3 10.8 15.2 6.7M8.3 13.2l6.9 4.1"/></svg></span><span class="lb" id="dockShareLb">Share</span></button>
+  <button class="dockBtn" data-nav="settings"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3.1"/><path d="M16.7 12h3.4M14.35 16.06l2.4 2.4M12 16.7v3.4M7.3 12H3.9M9.65 16.06l-2.4 2.4M7.25 7.6 4.85 5.2M12 7.3V3.9M16.75 7.6l2.4-2.4"/></svg></span><span class="lb">Settings</span></button>
+  <button class="dockBtn" data-nav="hide"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12s3.4-6.2 9-6.2c1.5 0 2.9.45 4.1 1.2M21 12s-3.4 6.2-9 6.2c-1.5 0-2.9-.45-4.1-1.2"/><path d="M4 4l16 16"/></svg></span><span class="lb">Hide HUD</span></button>
+</div>
+
+<!-- draw mode bar -->
+<div id="drawBar" style="position:fixed;left:50%;transform:translateX(-50%);bottom:96px;z-index:36;display:none;align-items:center;gap:8px;background:var(--glass);border:1px solid var(--glass-line);border-radius:16px;padding:9px 12px;box-shadow:0 10px 30px rgba(0,0,0,.55)">
+  <b style="font-size:13px">🎨 Draw</b>
+  <span id="drawSwatches" style="display:flex;gap:6px"></span>
+  <button class="miniBtn" id="drawBuddy" style="flex:none">Buddy draws</button>
+  <button class="miniBtn" id="drawClear" style="flex:none">Clear</button>
+  <button class="miniBtn" id="drawDone" style="flex:none">Done</button>
+</div>
+<div id="fadeVeil" style="position:fixed;inset:0;background:#000;opacity:0;pointer-events:none;transition:opacity .22s ease;z-index:55"></div>
+<style>
+#fadeVeil.bloom{opacity:1!important;background:radial-gradient(circle at 50% 55%,rgba(255,246,224,.98) 0%,rgba(255,205,110,.92) 30%,rgba(232,163,61,.75) 52%,rgba(10,40,50,.96) 82%);animation:veilBloom .55s ease both}
+@keyframes veilBloom{0%{transform:scale(.82);filter:brightness(1)}45%{transform:scale(1.06);filter:brightness(1.5)}100%{transform:scale(1);filter:brightness(1)}}
+</style>
+
+<!-- rescue bar: the ONLY thing visible when the HUD is hidden (plus My Screen) -->
+<div id="showHudBar">
+  <button id="btnShowHud">Show HUD</button>
+  <button id="btnRecStop">● Stop rec</button>
+  <button id="btnShowStop">STOP</button>
+  <label id="myScreenWrap2" style="display:flex;align-items:center;gap:7px;background:var(--glass);border:1px solid var(--glass-line);border-radius:12px;padding:6px 10px;font-size:13px;font-weight:800">My Screen
+    <select class="screenSel" id="myScreen2">
+      <option value="chat">Chat</option>
+      <option value="crew">Crew</option>
+      <option value="search">Search</option>
+      <option value="notes">Notes &amp; Reminders</option>
+      <option value="room">Room Setup</option>
+      <option value="settings">Settings</option>
+      <option value="about">About</option>
+    </select>
+  </label>
+</div>
+
+<div id="permCard"><div class="wzCard">
+  <div id="permTitle" style="font-size:19px;font-weight:800;margin-bottom:8px">Before you step onto the deck…</div>
+  <div id="permBody" style="font-size:14px;line-height:1.6">
+    Two permissions, in plain language. Nothing here is a trap, and saying no never locks you out.
+    <div style="margin-top:12px"><b>🎙️ Microphone (audio)</b><br>
+    QuestBuddi asks your browser for the mic so you can <b>talk</b> to your buddies — tap-to-talk voice commands. The mic is only live while you hold a conversation with it; nothing records in the background. Deny it and you simply type instead.</div>
+    <div style="margin-top:12px"><b>🎥 Video / capture</b><br>
+    Good news: QuestBuddi <b>cannot</b> see your room cameras — Quest keeps passthrough video private from web pages, and that's a privacy plus. QuestBuddi can only capture <b>its own 3D view</b> (the buddies and panels) when <i>you</i> tap Screenshot or Record on the dock. If your browser ever shows a capture permission prompt, it appears right then, at first use.</div>
+  </div>
+  <div id="permSummary" style="display:none;font-size:14px;line-height:1.7;margin-top:6px"></div>
+  <div id="permButtons" style="display:flex;gap:8px;margin-top:16px">
+    <button class="sendBtn" id="permContinue" style="padding:12px 20px;border-radius:10px">Continue</button>
+    <button class="sendBtn" id="permEnter" style="padding:12px 20px;border-radius:10px;display:none">Enter QuestBuddi</button>
+  </div>
+  <div class="smallNote" style="margin-top:10px">You can re-check or re-request the microphone any time in Settings → Permissions.</div>
+</div></div>
+<div id="roomWizard"><div class="wzCard">
+  <button id="wzClose" title="Close (you can finish setup later in Settings)">✕</button>
+  <div id="wzTitle">Room Setup</div>
+  <div id="wzBody"></div>
+  <div id="wzButtons"></div>
+</div></div>
+<div id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>
