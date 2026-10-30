@@ -58,6 +58,238 @@ function toast(msg, ms) {
 }
 
 /* =====================================================================
+   FACE + PERSONALITY DATABASES (v2 wiring, 2026-10-30) —
+   face-anim-db.json drives the drawn mouth (visemes) and the
+   expression layer; personality-behavior-db.json owns the affective
+   state (emotion + intensity per persona), persona baselines /
+   traits / emotion gains, triggers and sampler presets. Both load
+   at boot as labeled checker stages ('face database' /
+   'personality database'); a failed load records a health error
+   and announces itself — it never fails silently. If a database
+   is missing, only its feature turns off; the rest of the app
+   keeps booting (house checker pattern).
+   ===================================================================== */
+const QBDB = { face: null, pers: null, visById: {}, exprById: {}, emoById: {}, persById: {} };
+async function qbFetchJson(url) {
+  const r = await fetch(url, { cache: 'no-cache' });
+  if (!r.ok) throw new Error(url + ' — HTTP ' + r.status);
+  return r.json();
+}
+QBDB.loadFace = async function () {
+  if (QBDB.face) return;
+  const face = await qbFetchJson('face-anim-db.json');
+  if (!face || face.format !== 'questbuddi-face-anim/1' || !Array.isArray(face.visemes) || !face.phonemeToViseme) throw new Error('face-anim-db.json: unexpected format "' + (face && face.format) + '"');
+  QBDB.face = face;
+  face.visemes.forEach((v) => { QBDB.visById[v.id] = v; });
+  (face.expressions || []).forEach((e) => { QBDB.exprById[e.id] = e; });
+};
+QBDB.loadPers = async function () {
+  if (QBDB.pers) return;
+  const pers = await qbFetchJson('personality-behavior-db.json');
+  if (!pers || !/^questbuddi-personality-behavior\//.test(String(pers.format || '')) || !Array.isArray(pers.emotions) || !Array.isArray(pers.personas) || !Array.isArray(pers.triggers)) throw new Error('personality-behavior-db.json: unexpected format "' + (pers && pers.format) + '"');
+  QBDB.pers = pers;
+  pers.emotions.forEach((e) => { QBDB.emoById[e.id] = e; });
+  pers.personas.forEach((p) => { QBDB.persById[p.id] = p; });
+};
+function qbDbFailed(stageName) {
+  healthStage(stageName + ': FAILED (see App health)');
+  try { toast('⚠ The ' + stageName + ' failed to load, so that feature is off. Details in Settings → App health.', 6000); } catch (e) {}
+}
+
+/* ---------------- viseme engine (face database) ----------------
+   Text → grapheme tokens → phonemeToViseme → timed segments.
+   Sampling blends toward the next viseme early (coarticulation
+   lookahead) with smoothstep easing, attacks from silence and
+   releases back to silence at the phrase end — never snaps. */
+const VIS = { track: null };
+VIS._fields = ['mouthOpen', 'mouthWidth', 'lipRound', 'lipPress', 'jawDrop', 'teethShow', 'tongueShow'];
+VIS._smooth = (x) => { x = clamp(x, 0, 1); return x * x * (3 - 2 * x); };
+VIS._lerpVals = function (a, b, w) { const o = {}; VIS._fields.forEach((f) => { o[f] = lerp(a[f] || 0, b[f] || 0, w); }); return o; };
+VIS._tokensFor = function (word) {
+  const map = QBDB.face.phonemeToViseme;
+  const DIG = [['sh', 'sh'], ['ch', 'ch'], ['th', 'th'], ['zh', 'zh'], ['dh', 'dh'], ['ng', 'ng'], ['ph', 'f'], ['qu', 'k'], ['ck', 'k'], ['ee', 'ee'], ['ea', 'ee'], ['oo', 'oo'], ['ow', 'ow'], ['ou', 'aw'], ['ay', 'e'], ['ai', 'e'], ['oa', 'oh'], ['au', 'aw']];
+  const SING = { a: 'ah', e: 'eh', i: 'ih', o: 'oh', u: 'u', y: 'y', c: 'k', q: 'k', h: null };
+  const out = [];
+  let w = word;
+  if (w.length > 2 && /[^aeiou]e$/.test(w) && /[aeiou]/.test(w.slice(0, -1))) w = w.slice(0, -1); // silent final e
+  let i = 0;
+  while (i < w.length) {
+    let tok = null, adv = 1;
+    for (let d = 0; d < DIG.length; d++) { if (w.substr(i, 2) === DIG[d][0]) { tok = DIG[d][1]; adv = 2; break; } }
+    if (tok === null) {
+      const ch = w[i];
+      if (ch === 'x') { out.push('k', 's'); i++; continue; }
+      tok = (ch in SING) ? SING[ch] : ch;
+    }
+    if (tok && map[tok]) out.push(tok);
+    i += adv;
+  }
+  return out;
+};
+VIS.buildTrack = function (text) {
+  const T = QBDB.face.timing || {};
+  const avg = T.avgPhonemeMs || 82, minMs = T.minPhonemeMs || 45, vstretch = T.vowelStretch || 1.35;
+  const VOW = { a: 1, ae: 1, ah: 1, aw: 1, e: 1, ee: 1, eh: 1, i: 1, ih: 1, o: 1, oh: 1, oo: 1, ow: 1, u: 1 };
+  const clean = String(text || '').replace(/[🎙🔇😂🤣★♪●▶*_`#>\[\](){}]/g, ' ').toLowerCase();
+  const raw = []; let t = 0;
+  const push = (v, dur) => { raw.push({ v, t0: t, dur }); t += dur; };
+  clean.split(/(\s+|[.,!?;:]+)/).forEach((part) => {
+    if (!part) return;
+    if (/^\s+$/.test(part)) { push('sil', 40); return; }
+    if (/^[.,!?;:]+$/.test(part)) { push('sil', /[.!?]/.test(part) ? 170 : 90); return; }
+    part.split(/[^a-z']+/).forEach((word) => {
+      if (!word) return;
+      VIS._tokensFor(word.replace(/'/g, '')).forEach((tok) => {
+        const vid = QBDB.face.phonemeToViseme[tok];
+        if (vid) push(vid, Math.max(minMs, avg * (VOW[tok] ? vstretch : 0.8)));
+      });
+    });
+  });
+  while (raw.length && raw[raw.length - 1].v === 'sil') { t -= raw[raw.length - 1].dur; raw.pop(); }
+  while (raw.length && raw[0].v === 'sil') { const d0 = raw[0].dur; raw.shift(); t -= d0; raw.forEach((s) => { s.t0 -= d0; }); }
+  return { segs: raw, total: t };
+};
+VIS.startTrack = function (pid, text, startAt, endAt) {
+  if (!QBDB.face) { VIS.track = null; return; }
+  const built = VIS.buildTrack(text);
+  const target = Math.max(300, (endAt || startAt) - startAt);
+  if (!built.segs.length) { VIS.track = { pid, startAt, env: true, total: target }; return; } // envelope fallback
+  const scale = clamp(target / built.total, 0.5, 2.2);
+  let t = 0;
+  built.segs.forEach((s) => { s.t0 = t; s.dur = Math.max(28, s.dur * scale); t += s.dur; });
+  VIS.track = { pid, startAt, env: false, segs: built.segs, total: t };
+};
+VIS.clear = function () { VIS.track = null; };
+VIS.sample = function (pid, now) {
+  if (!QBDB.face) return null;
+  const tr = VIS.track; if (!tr || tr.pid !== pid) return null;
+  const sil = QBDB.visById.sil; if (!sil) return null;
+  const T = QBDB.face.timing || {};
+  const atk = T.attackMs || 40, rel = T.releaseMs || 90, look = T.coarticulationLookahead || 0.45;
+  const t = now - tr.startAt;
+  if (t < 0) return Object.assign({}, sil);
+  if (tr.env) {
+    // Audio-envelope fallback (no phonemes — e.g. symbol-only text):
+    // a loudness estimate with the DB's attack/release character.
+    if (t > tr.total + rel) { VIS.track = null; return null; }
+    const ts = t / 1000;
+    let lv = 0.22 + 0.5 * Math.abs(Math.sin(ts * 7.3) * 0.6 + Math.sin(ts * 11.7 + 1.7) * 0.4);
+    if (t > tr.total) lv *= 1 - VIS._smooth((t - tr.total) / rel);
+    lv = clamp(lv, 0, 0.85);
+    return { mouthOpen: lv, mouthWidth: 0.4, lipRound: 0.1, lipPress: 0, jawDrop: lv * 0.5, teethShow: lv * 0.4, tongueShow: 0 };
+  }
+  if (t >= tr.total) {
+    if (t < tr.total + rel && tr.segs.length) return VIS._lerpVals(QBDB.visById[tr.segs[tr.segs.length - 1].v] || sil, sil, VIS._smooth((t - tr.total) / rel));
+    VIS.track = null;
+    return null;
+  }
+  let i = 0;
+  while (i < tr.segs.length - 1 && t >= tr.segs[i].t0 + tr.segs[i].dur) i++;
+  const seg = tr.segs[i];
+  let out = Object.assign({}, QBDB.visById[seg.v] || sil);
+  const p = seg.dur > 0 ? (t - seg.t0) / seg.dur : 1;
+  const next = tr.segs[i + 1];
+  if (next && p > 1 - look) out = VIS._lerpVals(out, QBDB.visById[next.v] || sil, VIS._smooth((p - (1 - look)) / look));
+  if (t < atk) out = VIS._lerpVals(sil, out, VIS._smooth(t / atk));
+  return out;
+};
+
+/* ---------------- affective state (personality database) ----------------
+   Code-owned: the model never writes this. Triggers from the DB add
+   bounded intensity (scaled by the persona's emotionGain); intensity
+   decays exponentially (DB half-life) back to the persona's baseline
+   mood. The current emotion picks the face expression and tints TTS. */
+const AFF = { st: {} };
+AFF.profileFor = function (pid) {
+  if (!QBDB.pers) return null;
+  const map = { ada: 'ada-coding', jiwoo: 'jiwoo-design' };
+  return QBDB.persById[map[pid] || 'questbuddi-core'] || QBDB.persById['questbuddi-core'] || null;
+};
+AFF.emo = function (id) { return QBDB.emoById[id] || null; };
+AFF.baseline = function (pid) { const pr = AFF.profileFor(pid); return (pr && pr.baselineMood) || 'calm'; };
+AFF.traits = function (pid) { const pr = AFF.profileFor(pid); return (pr && pr.traits) || {}; };
+AFF.resetToBaseline = function (pid) {
+  const b = AFF.baseline(pid); const d = AFF.emo(b);
+  AFF.st[pid] = { emotion: b, intensity: d ? d.defaultIntensity : 0.4, at: nowMs(), idleFired: false };
+};
+AFF._ensure = function (pid) { if (!AFF.st[pid]) AFF.resetToBaseline(pid); return AFF.st[pid]; };
+AFF.current = function (pid, now) {
+  const s = AFF._ensure(pid);
+  const hl = (QBDB.pers && QBDB.pers.emotionDecay && QBDB.pers.emotionDecay.halfLifeMs) || 45000;
+  const inten = s.intensity * Math.pow(0.5, Math.max(0, now - s.at) / hl);
+  if (inten < 0.08) { const b = AFF.baseline(pid); const bd = AFF.emo(b); return { id: b, intensity: bd ? bd.defaultIntensity : 0.4, def: bd, baseline: true }; }
+  return { id: s.emotion, intensity: inten, def: AFF.emo(s.emotion), baseline: false };
+};
+AFF.apply = function (pid, emotionId, delta) {
+  const pr = AFF.profileFor(pid);
+  const gain = pr && pr.emotionGain && pr.emotionGain[emotionId] != null ? pr.emotionGain[emotionId] : 1;
+  const cur = AFF.current(pid, nowMs());
+  const def = AFF.emo(emotionId);
+  const base = (cur.id === emotionId && !cur.baseline) ? cur.intensity : (def ? def.defaultIntensity * 0.5 : 0.25);
+  const s = AFF._ensure(pid);
+  s.emotion = emotionId;
+  s.intensity = clamp(base + delta * gain, 0, 1);
+  s.at = nowMs();
+};
+AFF.trigger = function (pid, event) {
+  if (!QBDB.pers) return;
+  const tr = (QBDB.pers.triggers || []).find((x) => x.event === event);
+  if (tr) AFF.apply(pid, tr.emotion, tr.delta);
+};
+AFF.voiceMods = function (pid) {
+  const cur = AFF.current(pid, nowMs());
+  const v = cur.def && cur.def.voice; if (!v) return { rate: 1, pitch: 1 };
+  const pr = AFF.profileFor(pid);
+  const gain = pr && pr.emotionGain && pr.emotionGain[cur.id] != null ? pr.emotionGain[cur.id] : 1;
+  const k = clamp(cur.intensity * gain, 0, 1.2);
+  return { rate: 1 + (v.rate - 1) * k, pitch: 1 + (v.pitch - 1) * k };
+};
+AFF.detectUserEvent = function (pid, text) {
+  if (!QBDB.pers) return;
+  AFF._ensure(pid).idleFired = false;
+  const t = ' ' + String(text || '').toLowerCase() + ' ';
+  if (/\b(thank|thanks|great|awesome|amazing|perfect|brilliant|love it|good job|well done|nice work|you did it|it works|that works)\b/.test(t)) AFF.trigger(pid, 'user_praise_or_thanks');
+  else if (/\b(frustrat\w*|annoy\w*|stupid|broken|not working|doesn'?t work|won'?t work|hate|angry|upset|sad|ugh|damn|terrible|awful)\b/.test(t)) AFF.trigger(pid, 'user_frustrated_or_sad');
+  else if (/\b(idea|what if|imagine|design|draw|dream|invent|story about)\b/.test(t)) AFF.trigger(pid, 'user_shares_idea');
+  else if (/\?/.test(t) || /\b(how|why|help|show me|tell me|explain|fix|connect|set up)\b/.test(t)) AFF.trigger(pid, 'user_asks_task');
+};
+AFF.idleCheck = function () {
+  if (!QBDB.pers || typeof S === 'undefined' || !S.controlOn) return;
+  const now = nowMs(); if (now - (S.lastUserActivity || 0) < 4 * 60000) return;
+  const s = AFF._ensure(S.activePersonaId);
+  if (s.idleFired) return;
+  s.idleFired = true;
+  AFF.apply(S.activePersonaId, 'encouraging', 0.5); // DB rule: idle-check-in
+};
+
+/* ---------------- dynamic (viseme) face rendering ----------------
+   While a buddy speaks, its face texture is redrawn (~30 fps) from
+   the face database: affective expression underneath (eyes, brows,
+   smile bias), viseme mouth on top. */
+const FACE_DYN = {};
+function drawDynFace(pid, mv, now) {
+  const B = BOTS[pid]; if (!B || !B.faceMesh || !QBDB.face) return;
+  if (B.dynAt && now - B.dynAt < 33) return;
+  B.dynAt = now;
+  let dyn = FACE_DYN[pid];
+  if (!dyn) { dyn = FACE_DYN[pid] = makeTex(448, 448); }
+  const p = personaById(pid);
+  let dbId = 'idle', dbExpr = QBDB.exprById.idle || null;
+  if (now < (S.laughUntil[pid] || 0)) { dbId = 'laughing'; dbExpr = QBDB.exprById.laughing || dbExpr; }
+  else if (QBDB.pers) { const cur = AFF.current(pid, now); if (cur.def && cur.def.faceAnimExpression) { dbId = cur.def.faceAnimExpression; dbExpr = QBDB.exprById[dbId] || dbExpr; } }
+  let eyesClosed = false;
+  if (B.nextBlink && now >= B.nextBlink && now < B.nextBlink + 150) eyesClosed = true;
+  else if (B.nextBlink && now >= B.nextBlink + 150) B.nextBlink = now + 2000 + Math.random() * 2800;
+  const ctx = dyn.ctx;
+  ctx.clearRect(0, 0, dyn.c.width, dyn.c.height);
+  drawFaceArt(ctx, p, dbId, 224, 224, 190, { mouth: mv, db: dbExpr, eyesClosed: eyesClosed });
+  dyn.tex.needsUpdate = true;
+  const mesh = B.faceMesh.getObject3D('mesh');
+  if (mesh && mesh.material.map !== dyn.tex) { mesh.material.map = dyn.tex; mesh.material.needsUpdate = true; }
+  B.faceExpr = 'dyn:' + dbId;
+}
+
+/* =====================================================================
    PERSONA ROSTER — identity data verbatim from
    ~/workspace/aibuddies/aibuddies-personas-spec.md (v1.1, Section 1).
    Visual/laugh params are the app layer: stylized ROBOT bots (color,
@@ -506,11 +738,14 @@ const LIVE = {
     const cfg = LIVE.cfg(); if (!cfg.on || !cfg.key) return null;
     const idn = identityOf(p.id);
     const mem = (S.memories[p.id] || []).map((x) => x.fact).join('; ');
-    const sys = 'You are ' + idn.name + ', a buddy persona in the QuestBuddi VR app by Gr8yzone Studios Inc. Home: ' + idn.homeCity + ', ' + idn.homeCountry + '. Backstory: ' + idn.backstory + ' Expertise: ' + idn.expertise.join(', ') + '. Tone: ' + idn.tone + ' Speech style: ' + idn.speechStyle + (mem ? ' Facts you remember about the user: ' + mem : '') + ' Keep replies warm, plain, and under 120 words. Never claim you can control the user\'s headset or other apps.';
+    let sys = 'You are ' + idn.name + ', a buddy persona in the QuestBuddi VR app by Gr8yzone Studios Inc. Home: ' + idn.homeCity + ', ' + idn.homeCountry + '. Backstory: ' + idn.backstory + ' Expertise: ' + idn.expertise.join(', ') + '. Tone: ' + idn.tone + ' Speech style: ' + idn.speechStyle + (mem ? ' Facts you remember about the user: ' + mem : '') + ' Keep replies warm, plain, and under 120 words. Never claim you can control the user\'s headset or other apps.';
+    if (QBDB.pers) { const mood = AFF.current(p.id, nowMs()); sys += ' Current mood: ' + mood.id + ' (intensity ' + mood.intensity.toFixed(2) + ').'; }
     const msgs = [{ role: 'system', content: sys }].concat(history.slice(-8).map((h) => ({ role: h.role === 'user' ? 'user' : 'assistant', content: h.text })), [{ role: 'user', content: userText }]);
     const isGrok = cfg.provider === 'grok';
     const url = isGrok ? 'https://api.x.ai/v1/chat/completions' : 'https://api.perplexity.ai/chat/completions';
     const body = { model: isGrok ? 'grok-4' : 'sonar', messages: msgs, max_tokens: 300 };
+    const prof = QBDB.pers ? AFF.profileFor(p.id) : null;
+    if (prof && prof.samplerPreset) { body.temperature = prof.samplerPreset.temperature; body.top_p = prof.samplerPreset.topP; }
     const ctrl = new AbortController(); const to = setTimeout(() => ctrl.abort(), 20000);
     S.thinkingUntil = nowMs() + 21000; // face: 🤔 while Live AI thinks
     try {
@@ -536,6 +771,7 @@ async function sendUserMessage(raw) {
   await addMessage(pid, 'user', text);
   appendMsgToThread('user', text, nowMs());
   const learned = await learnFromUser(pid, text);
+  if (QBDB.pers) AFF.detectUserEvent(pid, text);
   const token = ++S.replyToken;
   setTyping(true);
   botWalkToSpotlight(pid, false);
@@ -560,6 +796,7 @@ async function sendUserMessage(raw) {
 function startSpeaking(pid, text) {
   S.speakingPersona = pid;
   S.speakingUntil = nowMs() + clamp(text.length * 55, 1400, 7000);
+  if (QBDB.face) VIS.startTrack(pid, text, nowMs(), S.speakingUntil);
   if (/😂|🤣|haha|hehe|\blol\b/i.test(text)) { S.laughPersona = pid; S.laughUntil[pid] = nowMs() + 1500; }
 }
 
@@ -623,6 +860,7 @@ function renderChips() {
 async function selectPersona(pid, opts) {
   opts = opts || {};
   S.activePersonaId = pid; LS.set('activePersona', pid);
+  if (QBDB.pers) AFF.resetToBaseline(pid); // personality DB: baseline mood for this persona
   renderPersonaHead(); await renderThread(); renderCrewGrid(); markActiveBot();
   const conv = await ensureConversation(pid);
   const msgs = await messagesOf(conv.id);
@@ -631,6 +869,7 @@ async function selectPersona(pid, opts) {
     if (msgs.length === 0 && !opts.noGreet) {
       const g = identityOf(pid).greeting;
       await addMessage(pid, 'buddy', g); appendMsgToThread('buddy', g, nowMs()); startSpeaking(pid, g);
+      if (QBDB.pers) AFF.trigger(pid, 'user_greeting');
     }
   }
   drawIdentityPanel(); drawChatPanel();
@@ -856,6 +1095,7 @@ function stopAll(reason) {
   S.replyToken++; if (S.replyTimer) { clearTimeout(S.replyTimer); S.replyTimer = null; }
   setTyping(false);
   S.speakingPersona = null; S.speakingUntil = 0; S.laughPersona = null;
+  VIS.clear();
   if (S.recognition && S.listening) { try { S.recognition.stop(); } catch (e) {} }
   S.listening = false; const mb = $('micBtn'); if (mb) mb.classList.remove('listening');
   ambStop();
@@ -2361,8 +2601,17 @@ function tickFrame(dt, timeMs) {
         B.head.object3D.quaternion.slerp(new THREE.Quaternion(), Math.min(1, dt * 2));
       }
     }
-    // mouth talk / smile
-    if (B.mouth) { const ms = speaking ? 1 + Math.abs(Math.sin(t * 24)) * 0.85 : 1; B.mouth.scale.set(1, ms, 1); }
+    // mouth: viseme-driven from the face database (the old sine-wave
+    // flap is retired). Sample the speech track once per frame; the
+    // values feed the dynamic face texture, and a physical mouth
+    // mesh (if a skin ever adds one) scales from the same values.
+    const mvNow = QBDB.face ? VIS.sample(pid, now) : null;
+    B.visemeNow = mvNow;
+    if (mvNow) drawDynFace(pid, mvNow, now);
+    if (B.mouth) {
+      if (mvNow) B.mouth.scale.set(0.55 + mvNow.mouthWidth * 0.9, 0.25 + mvNow.mouthOpen * 1.6, 1);
+      else B.mouth.scale.set(1, 1, 1);
+    }
     // blink
     if (B.eyeL && B.eyeR) {
       if (now > B.nextBlink) { B.blinkAt = now; B.nextBlink = now + 2200 + Math.random() * 2600; }
@@ -2480,6 +2729,7 @@ function hlRevealContinue() {
 }
 function hlResolve(how) {
   if (!HL.active) return;
+  if (how === 'timeout' && QBDB.pers && typeof GUIDE_RUN !== 'undefined' && GUIDE_RUN.guide) AFF.trigger(S.activePersonaId, 'task_failed');
   HL.fadeT = 0.0001; // tick animates the fade
   const cb = HL.onResolve; HL.onResolve = null;
   if (HL.domEl) { HL.domEl.classList.remove('hl-cue'); HL.domEl = null; }
@@ -2565,7 +2815,8 @@ function speakReply(text) {
     speechSynthesis.cancel();
     const clean = text.replace(/[🎙🔇😂🤣★♪●▶]/g, '').slice(0, 420);
     const u = new SpeechSynthesisUtterance(clean);
-    u.rate = 1.02; u.pitch = 1.0;
+    const mods = QBDB.pers ? AFF.voiceMods(S.speakingPersona || S.activePersonaId) : { rate: 1, pitch: 1 };
+    u.rate = clamp(1.02 * mods.rate, 0.5, 2); u.pitch = clamp(mods.pitch, 0, 2);
     speechSynthesis.speak(u);
   } catch (e) {}
 }
@@ -2776,7 +3027,7 @@ async function startGuide(id) {
 function guideNext() {
   const g = GUIDE_RUN.guide; if (!g) return;
   GUIDE_RUN.idx++;
-  if (GUIDE_RUN.idx >= g.steps.length) { GUIDE_RUN.guide = null; pilotSay(g.done); return; }
+  if (GUIDE_RUN.idx >= g.steps.length) { GUIDE_RUN.guide = null; if (QBDB.pers) AFF.trigger(S.activePersonaId, 'task_succeeded'); pilotSay(g.done); return; }
   const step = g.steps[GUIDE_RUN.idx];
   pilotSay(step.text);
   if (step.hl) hlShow(step.hl, 'desc', { onResolve: () => guideNext() });
@@ -3075,6 +3326,8 @@ async function boot() {
   try { setupSpeech(); paintPerms(); } catch (e) { healthError(e, 'speech/perms'); }
   try { PERSONAS.forEach((pp) => { const L = LOVES[pp.id]; if (L) pp.loves = L.love; }); } catch (e) {}
   try { await dbInit(); healthStage('db:ready'); } catch (e) { healthError(e, 'dbInit'); }
+  try { await QBDB.loadFace(); healthStage('face database'); } catch (e) { healthError(e, 'face database'); qbDbFailed('face database'); }
+  try { await QBDB.loadPers(); healthStage('personality database'); } catch (e) { healthError(e, 'personality database'); qbDbFailed('personality database'); }
   try { renderCrewGrid(); fillSearchPersonas(); await renderNotes(); healthStage('ui:lists'); } catch (e) { healthError(e, 'lists'); }
   try { await loadAvatarFromDb(); healthStage('avatar:loaded'); } catch (e) { healthError(e, 'avatarLoad'); }
   const savedActive = LS.get('activePersona', PERSONAS[0].id);
@@ -3085,6 +3338,7 @@ async function boot() {
     const total = await totalMessageCount();
     if (total === 0) {
       const reply = await pilotSay(identityOf(S.activePersonaId).greeting);
+      if (reply && QBDB.pers) AFF.trigger(S.activePersonaId, 'user_greeting');
       hlShow('give', 'desc');
       if (reply) HL.spokeAt = reply.ts + 400;
       toast('Welcome to QuestBuddi! Tap GIVE BUDDIES CONTROL when you are ready.', 5000);
@@ -3094,6 +3348,7 @@ async function boot() {
   try { const r = await ROOM_LOAD(); if (r) { applyRoom(); toast('Room loaded ✓ — your saved room is ready.', 3500); } updateRoomStatus(); healthStage('room:loaded'); } catch (e) { healthError(e, 'roomLoad'); }
   try { updateControlUI(); refreshVoiceUI(); refreshHealthPanel(); } catch (e) {}
   setInterval(() => { checkReminders(); }, 30000);
+  setInterval(() => { AFF.idleCheck(); }, 30000);
   checkReminders();
   healthStage('boot:done');
   if (sceneReady && !bootDone) { bootDone = true; try { init3D(); healthStage('3d:ready'); } catch (e) { healthError(e, 'init3D'); } }
@@ -3199,7 +3454,7 @@ function visualTick(dt, t) {
    persona+expression so only what's used costs memory.
    ===================================================================== */
 const FACE_TEX = {};
-function drawFaceArt(ctx, p, expr, cx, cy, R) {
+function drawFaceArt(ctx, p, expr, cx, cy, R, o) {
   const ink = '#2b2320', mouthC = '#8a5a44';
   // soft skin-glow tint (persona pastel)
   const g = ctx.createRadialGradient(cx, cy, R * 0.1, cx, cy, R * 1.02);
@@ -3246,17 +3501,64 @@ function drawFaceArt(ctx, p, expr, cx, cy, R) {
       ctx.beginPath(); ctx.arc(cx, my - r * 0.45, r, 0.18 * Math.PI, 0.82 * Math.PI); ctx.stroke();
     }
   }
+  // ---- face-database layer (v2): brows from the expression, and a
+  // viseme mouth when speech values are supplied via opts ----
+  const O = o || {};
+  const dbSmile = O.db ? (O.db.smile || 0) : 0;
+  function browLines(raise, furrow) {
+    ctx.strokeStyle = ink; ctx.lineWidth = R * 0.055;
+    [-1, 1].forEach((s) => {
+      const bx = cx + s * eyeDX, by = eyeY - eyeR * 1.55 - (raise || 0) * R * 0.10;
+      ctx.beginPath();
+      ctx.moveTo(bx - eyeR * 0.8, by + (furrow || 0) * R * 0.07);
+      ctx.lineTo(bx + eyeR * 0.8, by - (furrow || 0) * s * R * 0.09 + (furrow || 0) * R * 0.02);
+      ctx.stroke();
+    });
+  }
+  function visemeMouth(mv) {
+    const my = cy + R * 0.40;
+    const w = Math.max(R * 0.05, R * (0.15 + mv.mouthWidth * 0.30) * (1 - mv.lipRound * 0.38));
+    const h = R * (0.012 + mv.mouthOpen * 0.30 + mv.jawDrop * 0.05);
+    if (mv.lipPress > 0.65) { // lips pressed shut (PP viseme)
+      ctx.strokeStyle = mouthC; ctx.lineWidth = R * 0.05;
+      ctx.beginPath(); ctx.moveTo(cx - w, my); ctx.quadraticCurveTo(cx, my - dbSmile * R * 0.05, cx + w, my); ctx.stroke();
+      return;
+    }
+    if (h <= R * 0.028) { smileArc(R * 0.30, 0.38, false); return; }
+    ctx.fillStyle = '#7c4530';
+    ctx.beginPath(); ctx.ellipse(cx, my, w, h, 0, 0, 7); ctx.fill();
+    if (mv.teethShow > 0.25) { ctx.fillStyle = '#fff8ee'; ctx.beginPath(); ctx.ellipse(cx, my - h * 0.52, w * 0.9, h * 0.45 * mv.teethShow, 0, 0, 7); ctx.fill(); }
+    if (mv.tongueShow > 0.25) { ctx.fillStyle = '#ff9eb0'; ctx.beginPath(); ctx.ellipse(cx, my + h * 0.48, w * 0.52, h * 0.4 * mv.tongueShow, 0, 0, 7); ctx.fill(); }
+    ctx.strokeStyle = mouthC; ctx.lineWidth = R * 0.045;
+    ctx.beginPath(); ctx.ellipse(cx, my, w, h, 0, 0, 7); ctx.stroke();
+  }
+  if (O.db) browLines(O.db.browRaise, O.db.browFurrow);
+  if (O.mouth) {
+    if (O.eyesClosed) { closedEye(cx - eyeDX, false); closedEye(cx + eyeDX, false); }
+    else if (expr === 'laughing') { closedEye(cx - eyeDX, true); closedEye(cx + eyeDX, false); }
+    else if (expr === 'listening') { starEye(cx - eyeDX); starEye(cx + eyeDX); }
+    else if (expr === 'thinking') { glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, -eyeR * 0.3); }
+    else { glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, 0); }
+    visemeMouth(O.mouth);
+    return;
+  }
   if (expr === 'laugh') { closedEye(cx - eyeDX, true); closedEye(cx + eyeDX, false); smileArc(R * 0.42, 0.42, true, 1.15); }
   else if (expr === 'greet') { closedEye(cx - eyeDX, false); closedEye(cx + eyeDX, false); smileArc(R * 0.40, 0.38, true, 1.1); }
   else if (expr === 'blink') { closedEye(cx - eyeDX, false); closedEye(cx + eyeDX, false); smileArc(R * 0.34, 0.36, false); }
   else if (expr === 'listen') { starEye(cx - eyeDX); starEye(cx + eyeDX); smileArc(R * 0.36, 0.38, true, 1); }
-  else if (expr === 'think') {
+  else if (expr === 'think' || expr === 'thinking') {
     glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, -eyeR * 0.3);
     ctx.strokeStyle = ink; ctx.lineWidth = R * 0.06;
     ctx.beginPath(); ctx.moveTo(cx + eyeDX - eyeR * 0.8, eyeY - eyeR * 1.5); ctx.lineTo(cx + eyeDX + eyeR * 0.8, eyeY - eyeR * 1.75); ctx.stroke();
     ctx.beginPath(); ctx.moveTo(cx + R * 0.10, cy + R * 0.42); ctx.lineTo(cx + R * 0.34, cy + R * 0.40); ctx.stroke();
   }
   else if (expr === 'speak') { glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, 0); smileArc(R * 0.38, 0.40, true, 1.05); }
+  // face-database expression ids (affective layer, static path)
+  else if (expr === 'happy' || expr === 'encouraging') { glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, 0); smileArc(R * 0.40, 0.38, true, 1.05); }
+  else if (expr === 'laughing') { closedEye(cx - eyeDX, true); closedEye(cx + eyeDX, false); smileArc(R * 0.42, 0.42, true, 1.15); }
+  else if (expr === 'listening') { starEye(cx - eyeDX); starEye(cx + eyeDX); smileArc(R * 0.36, 0.38, true, 1); }
+  else if (expr === 'surprised') { glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, 0); ctx.fillStyle = '#7c4530'; ctx.beginPath(); ctx.arc(cx, cy + R * 0.40, R * 0.09, 0, 7); ctx.fill(); }
+  else if (expr === 'concerned') { glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, 0); ctx.strokeStyle = mouthC; ctx.lineWidth = R * 0.085; ctx.beginPath(); ctx.arc(cx, cy + R * 0.54, R * 0.30, Math.PI * 1.18, Math.PI * 1.82); ctx.stroke(); }
   else { glossyEye(cx - eyeDX, 0); glossyEye(cx + eyeDX, 0); smileArc(R * 0.34, 0.36, false); }
 }
 function faceTexture(p, expr) {
@@ -3287,6 +3589,11 @@ function facesTick(now) {
     else if (now < (B.waveUntil || 0)) expr = 'greet';
     else if (pid === S.activePersonaId && (S.listening || (S.typingUntil || 0) > now)) expr = 'listen';
     else if (pid === S.activePersonaId && (S.thinkingUntil || 0) > now) expr = 'think';
+    if (B.faceExpr && B.faceExpr.indexOf('dyn:') === 0 && S.speakingPersona === pid && now < S.speakingUntil) continue; // viseme face owns the texture while speaking
+    if (QBDB.pers && pid === S.activePersonaId && expr === 'idle') { // affective layer picks the resting expression
+      const cur = AFF.current(pid, now);
+      if (cur.def && cur.def.faceAnimExpression && cur.def.faceAnimExpression !== 'idle') expr = cur.def.faceAnimExpression;
+    }
     if (expr === 'idle' || expr === 'listen' || expr === 'think') {
       if (now >= B.nextBlink && now < B.nextBlink + 150) expr = 'blink';
       else if (now >= B.nextBlink + 150) B.nextBlink = now + 2000 + Math.random() * 2800;
